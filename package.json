@@ -1,5 +1,6 @@
 {
   "name": "kiteapp",
+  "homepage": "https://github.com/Khushibhansali/kite",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -10,6 +11,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^0.10.34",
+    "framer-motion": "^12.38.0",
+    "lucide-react": "^1.8.0",
     "p5": "^2.2.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"

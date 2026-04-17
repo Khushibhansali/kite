@@ -1,613 +1,788 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import p5 from 'p5'
+import { useState, useEffect, useRef, useCallback } from "react";
+import { motion, useSpring, useTransform, AnimatePresence } from "framer-motion";
+import { Wind, Scissors, Feather, Star, ChevronRight, RefreshCw } from "lucide-react";
 
-const SCENES = {
-  DESIGN_STUDIO: 1,
-  SOMATIC_FLIGHT: 2,
-  NARRATIVE_TENSIONS: 3,
-  SUCCESS_CHOICE: 4,
-  BALANCED_MIRROR: 5,
+// ─── CONTENT DATA ─────────────────────────────────────────────────────────────
+const DECISIONS = [
+  {
+    id: 1,
+    left: { label: "Roots", text: "Lean into the warmth of tradition and shared family history.", color: "#c084fc" },
+    right: { label: "Pulse", text: "Sync with the energy of the modern world around you.", color: "#38bdf8" },
+  },
+  {
+    id: 2,
+    left: { label: "Legacy", text: "Honor the expectations of those who paved the way for you.", color: "#f472b6" },
+    right: { label: "Self", text: "Forging a path that feels true to your own unique rhythm.", color: "#4ade80" },
+  },
+  {
+    id: 3,
+    left: { label: "Duty", text: "Build on the secure foundation of your family\'s sacrifices.", color: "#fb923c" },
+    right: { label: "Dream", text: "Explore a creative calling that speaks to your personal vision.", color: "#a78bfa" },
+  },
+];
+
+// ─── SPRING PHYSICS HOOK ───────────────────────────────────────────────────────
+function useKitePhysics() {
+  const x = useSpring(0, { stiffness: 40, damping: 12, mass: 1.8 });
+  const y = useSpring(0, { stiffness: 40, damping: 12, mass: 1.8 });
+  const rotate = useSpring(0, { stiffness: 60, damping: 15 });
+
+  const setTarget = useCallback((tx, ty, tilt = 0) => {
+    x.set(tx);
+    y.set(ty);
+    rotate.set(tilt);
+  }, [x, y, rotate]);
+
+  return { x, y, rotate, setTarget };
 }
 
-const PRESSURE_BUBBLES = [
-  { side: 'left', label: "Do it for the 'gram'", effect: 'peer' },
-  { side: 'left', label: 'Alienation', effect: 'peer' },
-  { side: 'left', label: 'Individualism', effect: 'peer' },
-  { side: 'right', label: 'Family Honor', effect: 'root' },
-  { side: 'right', label: 'The Translator Burden', effect: 'root' },
-  { side: 'right', label: 'Guilt', effect: 'root' },
-]
+// ─── KITE SVG SHAPES ──────────────────────────────────────────────────────────
+function KiteSVG({ shape, style, tailLength, tailType }) {
+  const tailSegments = Math.max(3, Math.floor(tailLength / 20));
 
-const KITE_SHAPES = {
-  Diamond: [
-    { x: 0, y: -42 },
-    { x: 32, y: 0 },
-    { x: 0, y: 42 },
-    { x: -32, y: 0 },
-  ],
-  Hexagon: [
-    { x: 0, y: -38 },
-    { x: 34, y: -14 },
-    { x: 34, y: 14 },
-    { x: 0, y: 38 },
-    { x: -34, y: 14 },
-    { x: -34, y: -14 },
-  ],
-  Bird: [
-    { x: -48, y: -6 },
-    { x: -16, y: -30 },
-    { x: 0, y: -12 },
-    { x: 16, y: -30 },
-    { x: 48, y: -6 },
-    { x: 10, y: 20 },
-    { x: 0, y: 40 },
-    { x: -10, y: 20 },
-  ],
-}
-
-const FABRICS = {
-  Bandhani: ['#f97316', '#facc15', '#ef4444'],
-  Denim: ['#1e3a8a', '#2563eb', '#60a5fa'],
-  'Translucent Silk': ['#a855f7', '#ec4899', '#93c5fd'],
-}
-
-const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
-
-function SceneManager({ scene, setScene }) {
-  return (
-    <div className="flex gap-2 text-xs md:text-sm">
-      {[1, 2, 3, 4, 5].map((n) => (
-        <button
-          key={n}
-          type="button"
-          onClick={() => setScene(n)}
-          className={`rounded-full px-3 py-1 transition ${
-            scene === n
-              ? 'bg-purple-500 text-white'
-              : 'bg-white/10 text-white hover:bg-white/20'
-          }`}
-        >
-          Scene {n}
-        </button>
-      ))}
-    </div>
-  )
-}
-
-/**
- * MediaPipe gives normalized coordinates in camera space [0..1].
- * Because we mirror the <video> element with CSS (scaleX(-1)) to feel natural,
- * we must mirror X again when mapping to simulation/canvas so the string anchor
- * aligns with what the user sees: canvasX = (1 - rawX) * canvasWidth.
- */
-function useHandTracker(videoRef, enabled) {
-  const [hands, setHands] = useState({
-    left: { x: 0.33, y: 0.65, visible: false },
-    right: { x: 0.67, y: 0.65, visible: false },
-  })
-  const cameraRef = useRef(null)
-  const handsRef = useRef(null)
-
-  useEffect(() => {
-    if (!enabled || !videoRef.current || !window.Hands || !window.Camera) return
-    let isMounted = true
-    const mpHands = new window.Hands({
-      locateFile: (file) =>
-        `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
-    })
-    handsRef.current = mpHands
-    mpHands.setOptions({
-      maxNumHands: 2,
-      modelComplexity: 1,
-      minDetectionConfidence: 0.6,
-      minTrackingConfidence: 0.55,
-    })
-
-    mpHands.onResults((results) => {
-      if (!isMounted) return
-      const next = {
-        left: { x: 0.33, y: 0.65, visible: false },
-        right: { x: 0.67, y: 0.65, visible: false },
-      }
-      const landmarks = results.multiHandLandmarks || []
-      const handedness = results.multiHandedness || []
-      for (let i = 0; i < landmarks.length; i += 1) {
-        const idxTip = landmarks[i][8]
-        const handLabel = handedness[i]?.label?.toLowerCase() || 'right'
-        if (!idxTip) continue
-        next[handLabel] = {
-          x: idxTip.x,
-          y: idxTip.y,
-          visible: true,
-        }
-      }
-      setHands(next)
-    })
-
-    cameraRef.current = new window.Camera(videoRef.current, {
-      onFrame: async () => {
-        if (handsRef.current && videoRef.current) {
-          await handsRef.current.send({ image: videoRef.current })
-        }
-      },
-      width: 960,
-      height: 540,
-    })
-    cameraRef.current.start()
-
-    return () => {
-      isMounted = false
-      if (cameraRef.current) {
-        cameraRef.current.stop()
-      }
-      if (handsRef.current) {
-        handsRef.current.close()
-      }
-    }
-  }, [enabled, videoRef])
-
-  return hands
-}
-
-function KitePhysics({
-  scene,
-  config,
-  hands,
-  onCatchBubble,
-  onChooseEnding,
-  effects,
-  pathRef,
-}) {
-  const wrapperRef = useRef(null)
-  const p5Ref = useRef(null)
-
-  const kitePoints = useMemo(
-    () => KITE_SHAPES[config.shape] || KITE_SHAPES.Diamond,
-    [config.shape],
-  )
-
-  useEffect(() => {
-    if (!wrapperRef.current) return undefined
-    const bubbles = []
-    let kite = { x: 460, y: 280, px: 452, py: 276 }
-    let bubbleCooldown = 0
-    let choiceTimer = 0
-    let chosen = false
-
-    const sketch = (s) => {
-      s.setup = () => {
-        const canvas = s.createCanvas(920, 560)
-        canvas.parent(wrapperRef.current)
-      }
-
-      s.draw = () => {
-        const leftAnchor = {
-          x: (1 - hands.left.x) * s.width,
-          y: hands.left.y * s.height,
-        }
-        const rightAnchor = {
-          x: (1 - hands.right.x) * s.width,
-          y: hands.right.y * s.height,
-        }
-
-        const peerLoad = effects.peer
-        const rootLoad = effects.root
-        const imbalance = peerLoad - rootLoad
-        const wind =
-          0.08 + Math.sin(s.frameCount * 0.02) * 0.05 + imbalance * 0.015
-        const gravity = 0.18 + rootLoad * 0.02
-        const drag = 0.985 - peerLoad * 0.01
-        const rightStiffness = clamp(0.06 + rootLoad * 0.016, 0.05, 0.18)
-        const leftStiffness = clamp(0.07 - peerLoad * 0.006, 0.03, 0.1)
-        const tailWeight = config.tailWeight * 0.08
-
-        const vx = (kite.x - kite.px) * drag + wind
-        const vy = (kite.y - kite.py) * drag + gravity + tailWeight
-        kite.px = kite.x
-        kite.py = kite.y
-        kite.x += vx
-        kite.y += vy
-
-        const applyStringConstraint = (anchor, restLength, stiffness) => {
-          const dx = kite.x - anchor.x
-          const dy = kite.y - anchor.y
-          const dist = Math.max(1, Math.hypot(dx, dy))
-          const pull = (dist - restLength) * stiffness
-          kite.x -= (dx / dist) * pull
-          kite.y -= (dy / dist) * pull
-          return dist
-        }
-
-        const leftDistance = applyStringConstraint(
-          leftAnchor,
-          150 + config.tailLength * 4,
-          leftStiffness,
-        )
-        applyStringConstraint(rightAnchor, 150 + config.tailLength * 4, rightStiffness)
-
-        // Peer pressure can snap left string if stretched too hard.
-        const leftStringSnapped = peerLoad >= 3 && leftDistance > 270
-        if (leftStringSnapped) {
-          kite.x += 1.2 + Math.sin(s.frameCount * 0.8) * 0.9
-          kite.y += Math.cos(s.frameCount * 0.25) * 0.6
-        }
-
-        kite.x = clamp(kite.x, 30, s.width - 30)
-        kite.y = clamp(kite.y, 24, s.height - 24)
-
-        if (scene >= SCENES.NARRATIVE_TENSIONS && scene <= SCENES.SUCCESS_CHOICE) {
-          bubbleCooldown -= 1
-          if (bubbleCooldown <= 0 && bubbles.length < 5) {
-            const spec =
-              PRESSURE_BUBBLES[Math.floor(Math.random() * PRESSURE_BUBBLES.length)]
-            bubbles.push({
-              ...spec,
-              id: `${spec.label}-${Date.now()}-${Math.random()}`,
-              x:
-                spec.side === 'left'
-                  ? s.random(80, s.width * 0.45)
-                  : s.random(s.width * 0.55, s.width - 80),
-              y: s.random(90, s.height - 120),
-              r: s.random(32, 42),
-              life: 1200,
-            })
-            bubbleCooldown = 110
-          }
-        }
-
-        for (let i = bubbles.length - 1; i >= 0; i -= 1) {
-          const b = bubbles[i]
-          b.life -= 1
-          b.y += Math.sin((s.frameCount + i * 14) * 0.03) * 0.45
-          const hit = Math.hypot(kite.x - b.x, kite.y - b.y) < b.r + 26
-          if (hit) {
-            onCatchBubble(b.effect)
-            bubbles.splice(i, 1)
-            continue
-          }
-          if (b.life <= 0) {
-            bubbles.splice(i, 1)
-          }
-        }
-
-        if (scene >= SCENES.SOMATIC_FLIGHT) {
-          pathRef.current.push({ x: kite.x, y: kite.y })
-          if (pathRef.current.length > 900) pathRef.current.shift()
-        }
-
-        if (scene === SCENES.SUCCESS_CHOICE) {
-          choiceTimer += 1
-          const centerBias = 0.02 * (effects.peer - effects.root)
-          kite.x += centerBias
-          if (!chosen && choiceTimer > 380) {
-            chosen = true
-            onChooseEnding(kite.x < s.width / 2 ? 'external' : 'internal')
-          }
-        }
-
-        s.background(7, 10, 30, scene === SCENES.BALANCED_MIRROR ? 45 : 255)
-        drawWindBands(s, wind)
-        drawZonesIfChoice(s, scene)
-        drawStrings(s, leftAnchor, rightAnchor, kite, effects, leftStringSnapped)
-        drawBubbles(s, bubbles)
-        drawKite(s, kite, kitePoints, config.fabric, effects)
-        drawTail(s, kite, config.tailLength, config.tailWeight)
-
-        if (scene === SCENES.BALANCED_MIRROR) {
-          drawConstellation(s, pathRef.current)
-        }
-      }
-    }
-
-    p5Ref.current = new p5(sketch)
-    return () => {
-      if (p5Ref.current) {
-        p5Ref.current.remove()
-      }
-    }
-  }, [config, effects, hands, kitePoints, onCatchBubble, onChooseEnding, pathRef, scene])
-
-  return <div ref={wrapperRef} className="overflow-hidden rounded-2xl border border-white/20" />
-}
-
-function drawWindBands(s, wind) {
-  s.noFill()
-  s.stroke(120, 180, 255, 50)
-  for (let y = 70; y < s.height; y += 80) {
-    s.beginShape()
-    for (let x = 0; x < s.width; x += 24) {
-      const wave = Math.sin((x + s.frameCount * 4) * 0.015 + y * 0.01) * (8 + wind * 45)
-      s.vertex(x, y + wave)
-    }
-    s.endShape()
-  }
-}
-
-function drawZonesIfChoice(s, scene) {
-  if (scene !== SCENES.SUCCESS_CHOICE) return
-  s.noStroke()
-  s.fill(40, 116, 255, 45)
-  s.rect(0, 0, s.width / 2, s.height)
-  s.fill(246, 177, 65, 40)
-  s.rect(s.width / 2, 0, s.width / 2, s.height)
-}
-
-function drawStrings(s, left, right, kite, effects, snapped) {
-  const peerJitter = effects.peer > 0 ? Math.sin(s.frameCount * 0.8) * (effects.peer + 1.5) : 0
-  const rootGlow = 170 + effects.root * 14
-
-  s.strokeWeight(Math.max(1.4, 3 - effects.peer * 0.55))
-  s.stroke(60, 182, 255, 220)
-  s.line(left.x, left.y, kite.x + peerJitter, kite.y)
-
-  if (snapped) {
-    s.stroke(120, 220, 255, 130)
-    s.line(left.x, left.y, kite.x + 26, kite.y - 20)
-  }
-
-  s.strokeWeight(2.2 + effects.root * 0.9)
-  s.stroke(255, rootGlow, 85, 230)
-  s.line(right.x, right.y, kite.x, kite.y)
-
-  s.noStroke()
-  s.fill(255, 255, 255, 230)
-  s.circle(left.x, left.y, 10)
-  s.circle(right.x, right.y, 10)
-}
-
-function drawBubbles(s, bubbles) {
-  for (const b of bubbles) {
-    const leftStyle = b.effect === 'peer'
-    s.stroke(leftStyle ? '#48d4ff' : '#ffc265')
-    s.strokeWeight(2)
-    s.fill(leftStyle ? 'rgba(77,187,255,0.18)' : 'rgba(255,173,68,0.2)')
-    s.circle(b.x, b.y, b.r * 2)
-    s.noStroke()
-    s.fill(255)
-    s.textAlign(s.CENTER, s.CENTER)
-    s.textSize(12)
-    s.text(b.label, b.x, b.y)
-  }
-}
-
-function drawKite(s, kite, points, fabric, effects) {
-  const palette = FABRICS[fabric]
-  const balance = clamp(Math.abs(effects.peer - effects.root) / 5, 0, 1)
-  const saturationDrop = effects.root > effects.peer ? 50 : 15
-  const alpha = effects.peer > effects.root ? 190 : 235
-  const wildOffset = effects.peer > effects.root ? Math.sin(s.frameCount * 0.35) * 6 : 0
-  s.push()
-  s.translate(kite.x + wildOffset, kite.y)
-  s.rotate(Math.sin(s.frameCount * 0.05) * (0.1 + balance * 0.2))
-  s.stroke(255, 255 - saturationDrop, 255 - saturationDrop, 230)
-  s.strokeWeight(2)
-  s.fill(palette[0] + `${Math.round(alpha).toString(16).padStart(2, '0')}`)
-  s.beginShape()
-  for (const p of points) {
-    s.vertex(p.x, p.y)
-  }
-  s.endShape(s.CLOSE)
-  s.noStroke()
-  s.fill(palette[1])
-  s.circle(0, -8, 18)
-  s.fill(palette[2])
-  s.circle(0, 10, 16)
-  s.pop()
-}
-
-function drawTail(s, kite, length, weight) {
-  s.noFill()
-  s.stroke(255, 220, 180, 180)
-  s.strokeWeight(1.3 + weight * 0.25)
-  s.beginShape()
-  for (let i = 0; i < length; i += 1) {
-    const tx = kite.x + Math.sin((s.frameCount + i * 10) * 0.04) * (8 + weight)
-    const ty = kite.y + i * 8
-    s.vertex(tx, ty)
-  }
-  s.endShape()
-}
-
-function drawConstellation(s, path) {
-  s.stroke(206, 224, 255, 110)
-  s.strokeWeight(1)
-  for (let i = 1; i < path.length; i += 6) {
-    const a = path[i - 1]
-    const b = path[i]
-    s.line(a.x, a.y, b.x, b.y)
-    s.noStroke()
-    s.fill(255, 255, 255, 130)
-    s.circle(b.x, b.y, 2.7)
-    s.stroke(206, 224, 255, 110)
-  }
-}
-
-export default function App() {
-  const [scene, setScene] = useState(SCENES.DESIGN_STUDIO)
-  const [shape, setShape] = useState('Diamond')
-  const [fabric, setFabric] = useState('Bandhani')
-  const [tailLength, setTailLength] = useState(8)
-  const [tailWeight, setTailWeight] = useState(3)
-  const [peerPressure, setPeerPressure] = useState(0)
-  const [rootPressure, setRootPressure] = useState(0)
-  const [ending, setEnding] = useState(null)
-  const pathRef = useRef([])
-  const videoRef = useRef(null)
-  const hands = useHandTracker(videoRef, scene >= SCENES.SOMATIC_FLIGHT)
-
-  const config = useMemo(
-    () => ({ shape, fabric, tailLength, tailWeight }),
-    [fabric, shape, tailLength, tailWeight],
-  )
-  const effects = useMemo(
-    () => ({ peer: peerPressure, root: rootPressure }),
-    [peerPressure, rootPressure],
-  )
-
-  const onCatchBubble = (effect) => {
-    if (effect === 'peer') setPeerPressure((v) => Math.min(v + 1, 6))
-    if (effect === 'root') setRootPressure((v) => Math.min(v + 1, 6))
-  }
-
-  return (
-    <main className="relative min-h-screen bg-slate-950 text-slate-100">
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        className={`pointer-events-none absolute inset-0 h-full w-full object-cover transition duration-700 ${
-          scene >= SCENES.BALANCED_MIRROR
-            ? 'scale-x-[-1] opacity-30 grayscale contrast-[2.4] brightness-[0.25]'
-            : 'scale-x-[-1] opacity-10'
-        }`}
+  const shapes = {
+    Diamond: (
+      <polygon points="0,-60 45,0 0,70 -45,0"
+        fill={style === "Minimalist" ? "rgba(255,255,255,0.15)" : style === "Ethereal" ? "rgba(167,139,250,0.3)" : "rgba(255,255,255,0.9)"}
+        stroke={style === "High-Contrast" ? "#fff" : "rgba(255,255,255,0.7)"}
+        strokeWidth={style === "High-Contrast" ? "3" : "1.5"}
       />
-      <div className="relative mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-4 p-4 md:p-6">
-        <header className="rounded-2xl border border-white/20 bg-black/35 p-4 backdrop-blur-sm">
-          <h1 className="text-2xl font-semibold md:text-3xl">
-            The Tension of the String
-          </h1>
-          <p className="mt-1 text-sm text-slate-300 md:text-base">
-            Fly the kite between peer velocity and family gravity.
-          </p>
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-            <SceneManager scene={scene} setScene={setScene} />
-            <div className="flex gap-2 text-xs md:text-sm">
-              <span className="rounded-full bg-cyan-400/20 px-3 py-1 text-cyan-200">
-                Peer Load: {peerPressure}
-              </span>
-              <span className="rounded-full bg-amber-400/20 px-3 py-1 text-amber-200">
-                Root Load: {rootPressure}
-              </span>
-            </div>
-          </div>
-        </header>
+    ),
+    Hexagon: (
+      <polygon points="0,-60 52,-30 52,30 0,60 -52,30 -52,-30"
+        fill={style === "Minimalist" ? "rgba(255,255,255,0.1)" : style === "Ethereal" ? "rgba(196,181,253,0.25)" : "rgba(255,255,255,0.85)"}
+        stroke={style === "High-Contrast" ? "#fff" : "rgba(255,255,255,0.6)"}
+        strokeWidth={style === "High-Contrast" ? "3" : "1.5"}
+      />
+    ),
+    Bird: (
+      <path d="M0,-50 Q40,-30 60,10 Q30,0 0,20 Q-30,0 -60,10 Q-40,-30 0,-50Z"
+        fill={style === "Minimalist" ? "rgba(255,255,255,0.12)" : style === "Ethereal" ? "rgba(251,191,36,0.25)" : "rgba(255,255,255,0.85)"}
+        stroke={style === "High-Contrast" ? "#fbbf24" : "rgba(251,191,36,0.7)"}
+        strokeWidth={style === "High-Contrast" ? "3" : "1.5"}
+      />
+    ),
+    Plane: (
+      <path d="M0,-65 L30,20 L0,5 L-30,20 Z"
+        fill={style === "Minimalist" ? "rgba(255,255,255,0.1)" : style === "Ethereal" ? "rgba(52,211,153,0.25)" : "rgba(255,255,255,0.85)"}
+        stroke={style === "High-Contrast" ? "#34d399" : "rgba(52,211,153,0.6)"}
+        strokeWidth={style === "High-Contrast" ? "3" : "1.5"}
+      />
+    ),
+  };
 
-        <section className="grid gap-4 md:grid-cols-[320px_1fr]">
-          <aside className="rounded-2xl border border-white/20 bg-black/35 p-4 backdrop-blur-sm">
-            <h2 className="text-lg font-semibold">Scene 1: Design Studio</h2>
-            <p className="mt-1 text-sm text-slate-300">
-              Configure your kite before entering somatic control.
-            </p>
+  const tailY = shape === "Diamond" ? 70 : shape === "Hexagon" ? 60 : shape === "Bird" ? 20 : 20;
 
-            <label className="mt-4 block text-sm font-medium">Shape</label>
-            <select
-              value={shape}
-              onChange={(e) => setShape(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-white/20 bg-slate-900 px-3 py-2"
-            >
-              <option>Diamond</option>
-              <option>Hexagon</option>
-              <option>Bird</option>
-            </select>
+  return (
+    <svg width="140" height={200 + tailLength} viewBox={`-70 -70 140 ${200 + tailLength}`} style={{ overflow: "visible" }}>
+      {/* Cross spars */}
+      <line x1="-45" y1="0" x2="45" y2="0" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
+      <line x1="0" y1="-60" x2="0" y2="70" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
+      {shapes[shape]}
+      {/* Shimmer overlay */}
+      <ellipse cx="-10" cy="-20" rx="15" ry="20" fill="rgba(255,255,255,0.08)" transform="rotate(-20)" />
+      {/* Tail */}
+      {Array.from({ length: tailSegments }).map((_, i) => {
+        const ty = tailY + i * (tailLength / tailSegments);
+        const tx = Math.sin(i * 1.2) * 12;
+        return tailType === "Ribbons" ? (
+          <line key={i} x1={tx} y1={ty} x2={tx + Math.sin((i + 1) * 1.2) * 12} y2={ty + tailLength / tailSegments}
+            stroke={`hsla(${(i * 40 + 200) % 360},80%,75%,0.7)`} strokeWidth="2.5" strokeLinecap="round" />
+        ) : (
+          <polygon key={i}
+            points={`${tx},${ty} ${tx - 8},${ty + 16} ${tx + 8},${ty + 16}`}
+            fill={`hsla(${(i * 50 + 260) % 360},70%,70%,0.6)`}
+          />
+        );
+      })}
+    </svg>
+  );
+}
 
-            <label className="mt-4 block text-sm font-medium">Fabric</label>
-            <select
-              value={fabric}
-              onChange={(e) => setFabric(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-white/20 bg-slate-900 px-3 py-2"
-            >
-              <option>Bandhani</option>
-              <option>Denim</option>
-              <option>Translucent Silk</option>
-            </select>
+// ─── DECISION BUBBLE ──────────────────────────────────────────────────────────
+function DecisionBubble({ decision, side, onCollect, kiteX, kiteY, containerW, containerH }) {
+  const [pos, setPos] = useState({
+    x: side === "left" ? containerW * 0.2 : containerW * 0.75,
+    y: -100,
+  });
+  const [collected, setCollected] = useState(false);
+  const posRef = useRef(pos);
+  posRef.current = pos;
 
-            <label className="mt-4 block text-sm font-medium">
-              Tail Length ({tailLength})
-            </label>
-            <input
-              type="range"
-              min="4"
-              max="20"
-              value={tailLength}
-              onChange={(e) => setTailLength(Number(e.target.value))}
-              className="w-full"
-            />
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setPos(p => {
+        const drift = side === "left" ? Math.sin(Date.now() / 1800) * 18 : Math.sin(Date.now() / 2100 + 1) * 18;
+        const base = side === "left" ? containerW * 0.2 : containerW * 0.75;
+        return { x: base + drift, y: p.y + 0.9 };
+      });
+    }, 16);
+    return () => clearInterval(interval);
+  }, [side, containerW]);
 
-            <label className="mt-4 block text-sm font-medium">
-              Tail Weight ({tailWeight})
-            </label>
-            <input
-              type="range"
-              min="1"
-              max="10"
-              value={tailWeight}
-              onChange={(e) => setTailWeight(Number(e.target.value))}
-              className="w-full"
-            />
+  useEffect(() => {
+    if (collected) return;
+    const bx = posRef.current.x;
+    const by = posRef.current.y;
+    const dx = kiteX - bx;
+    const dy = kiteY - by;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 70) {
+      setCollected(true);
+      onCollect(side, decision);
+    }
+  }, [kiteX, kiteY, collected, side, decision, onCollect]);
 
-            <div className="mt-4 space-y-2 text-xs text-slate-300">
-              <p>
-                Left string: thinner, neon, and unstable with peer pressure.
-              </p>
-              <p>
-                Right string: thicker, golden, and stiffer with family pressure.
-              </p>
-            </div>
+  if (collected || pos.y > containerH + 100) return null;
 
-            <button
-              type="button"
-              onClick={() => setScene((s) => Math.min(s + 1, SCENES.BALANCED_MIRROR))}
-              className="mt-5 w-full rounded-lg bg-purple-500 px-4 py-2 font-medium text-white hover:bg-purple-400"
-            >
-              Advance Scene
-            </button>
-          </aside>
+  const col = decision[side].color;
 
-          <div className="space-y-4">
-            <KitePhysics
-              scene={scene}
-              config={config}
-              hands={hands}
-              onCatchBubble={onCatchBubble}
-              onChooseEnding={setEnding}
-              effects={effects}
-              pathRef={pathRef}
-            />
-            <div className="rounded-2xl border border-white/20 bg-black/35 p-4 text-sm text-slate-200 backdrop-blur-sm">
-              {scene === SCENES.SOMATIC_FLIGHT && (
-                <p>
-                  Scene 2 active: your left/right index fingers control the dual
-                  anchors of the kite string.
-                </p>
-              )}
-              {scene === SCENES.NARRATIVE_TENSIONS && (
-                <p>
-                  Scene 3 active: collide with bubbles to alter mass, stability,
-                  speed, and fragility.
-                </p>
-              )}
-              {scene === SCENES.SUCCESS_CHOICE && (
-                <p>
-                  Scene 4 active: the wind now pulls toward{' '}
-                  <strong>External Success</strong> (left) and{' '}
-                  <strong>Internal Creation</strong> (right). Current choice:{' '}
-                  <strong>{ending || 'pending...'}</strong>
-                </p>
-              )}
-              {scene === SCENES.BALANCED_MIRROR && (
-                <div className="space-y-1">
-                  <p>
-                    Scene 5 active: camera feed fades to silhouette; your string
-                    journey becomes a constellation transcript.
-                  </p>
-                  <p className="text-emerald-300">
-                    &quot;You held the tension. You didn&apos;t let the wind break
-                    the string, and you helped me navigate my dual identities.
-                    These opposing forces shape who we become.&quot;
-                  </p>
-                </div>
-              )}
-              {scene === SCENES.DESIGN_STUDIO && (
-                <p>
-                  Scene 1 active: configure shape, fabric, and tail physics before
-                  beginning flight.
-                </p>
-              )}
-            </div>
-          </div>
-        </section>
+  return (
+    <motion.div
+      style={{ position: "absolute", left: pos.x - 65, top: pos.y - 65, width: 130, height: 130 }}
+      initial={{ opacity: 0, scale: 0.5 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.3 }}
+    >
+      <div style={{
+        width: "100%", height: "100%", borderRadius: "50%",
+        background: `radial-gradient(circle at 35% 35%, ${col}55, ${col}22)`,
+        border: `1.5px solid ${col}88`,
+        backdropFilter: "blur(12px)",
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        padding: "12px", textAlign: "center",
+        boxShadow: `0 0 24px ${col}44, inset 0 0 16px ${col}22`,
+      }}>
+        <span style={{ fontSize: "9px", fontFamily: "'Cinzel', serif", letterSpacing: "2px", color: col, textTransform: "uppercase", marginBottom: 4 }}>
+          {decision[side].label}
+        </span>
+        <span style={{ fontSize: "10px", color: "rgba(255,255,255,0.85)", lineHeight: 1.4, fontFamily: "'Lora', serif" }}>
+          {decision[side].text}
+        </span>
       </div>
-    </main>
-  )
+    </motion.div>
+  );
+}
+
+// ─── STRING SVG ───────────────────────────────────────────────────────────────
+function KiteStrings({ leftFinger, rightFinger, kiteX, kiteY }) {
+  if (!leftFinger || !rightFinger) return null;
+  return (
+    <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+      <line x1={leftFinger.x} y1={leftFinger.y} x2={kiteX} y2={kiteY}
+        stroke="rgba(255,255,255,0.35)" strokeWidth="1.5" strokeDasharray="4 3" />
+      <line x1={rightFinger.x} y1={rightFinger.y} x2={kiteX} y2={kiteY}
+        stroke="rgba(255,255,255,0.35)" strokeWidth="1.5" strokeDasharray="4 3" />
+    </svg>
+  );
+}
+
+// ─── PHASE 1: WORKSHOP ────────────────────────────────────────────────────────
+function WorkshopPhase({ onDone }) {
+  const [shape, setShape] = useState("Diamond");
+  const [tailLength, setTailLength] = useState(80);
+  const [tailType, setTailType] = useState("Ribbons");
+  const [style, setStyle] = useState("Ethereal");
+
+  const shapes = ["Diamond", "Hexagon", "Bird", "Plane"];
+  const styles = ["Minimalist", "Ethereal", "High-Contrast"];
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: "24px" }}>
+      <motion.div initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 1 }}
+        style={{ maxWidth: 760, width: "100%", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32, alignItems: "start" }}>
+
+        {/* Preview */}
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
+          <p style={{ fontFamily: "'Cinzel', serif", letterSpacing: "4px", fontSize: 11, color: "rgba(255,255,255,0.5)", textTransform: "uppercase" }}>Your Kite</p>
+          <motion.div animate={{ y: [0, -12, 0] }} transition={{ repeat: Infinity, duration: 3.5, ease: "easeInOut" }}>
+            <KiteSVG shape={shape} style={style} tailLength={tailLength} tailType={tailType} />
+          </motion.div>
+        </div>
+
+        {/* Controls */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+          <div>
+            <p style={labelStyle}>Shape</p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {shapes.map(s => (
+                <button key={s} onClick={() => setShape(s)} style={chipStyle(shape === s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p style={labelStyle}>Visual Style</p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {styles.map(s => (
+                <button key={s} onClick={() => setStyle(s)} style={chipStyle(style === s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p style={labelStyle}>Tail Decoration</p>
+            <div style={{ display: "flex", gap: 8 }}>
+              {["Ribbons", "Triangles"].map(t => (
+                <button key={t} onClick={() => setTailType(t)} style={chipStyle(tailType === t)}>
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p style={labelStyle}>Tail Length: {tailLength}px</p>
+            <input type="range" min={40} max={160} value={tailLength}
+              onChange={e => setTailLength(Number(e.target.value))}
+              style={{ width: "100%", accentColor: "rgba(167,139,250,0.9)" }} />
+          </div>
+          <motion.button whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }}
+            onClick={() => onDone({ shape, style, tailLength, tailType })}
+            style={{
+              marginTop: 8, padding: "14px 28px", borderRadius: 12,
+              background: "linear-gradient(135deg, rgba(167,139,250,0.4), rgba(56,189,248,0.3))",
+              border: "1px solid rgba(255,255,255,0.25)", color: "#fff",
+              fontFamily: "'Cinzel', serif", letterSpacing: "3px", fontSize: 12,
+              cursor: "pointer", display: "flex", alignItems: "center", gap: 10, justifyContent: "center",
+              backdropFilter: "blur(8px)",
+            }}>
+            Launch Kite <ChevronRight size={16} />
+          </motion.button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+const labelStyle = {
+  fontFamily: "'Cinzel', serif", letterSpacing: "3px", fontSize: 10,
+  color: "rgba(255,255,255,0.5)", textTransform: "uppercase", marginBottom: 10
+};
+
+const chipStyle = (active) => ({
+  padding: "8px 16px", borderRadius: 8, cursor: "pointer", fontSize: 12,
+  fontFamily: "'Lora', serif",
+  background: active ? "rgba(167,139,250,0.35)" : "rgba(255,255,255,0.07)",
+  border: active ? "1px solid rgba(167,139,250,0.7)" : "1px solid rgba(255,255,255,0.12)",
+  color: active ? "#e9d5ff" : "rgba(255,255,255,0.6)",
+  backdropFilter: "blur(6px)", transition: "all 0.2s",
+});
+
+// ─── PHASE 2: ASCENT (CALIBRATION) ────────────────────────────────────────────
+function AscentPhase({ onReady }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const handLandmarkerRef = useRef(null);
+  const animFrameRef = useRef(null);
+  const [status, setStatus] = useState("Initializing MediaPipe…");
+  const [fingersDetected, setFingersDetected] = useState(0);
+  const [ready, setReady] = useState(false);
+  
+  useEffect(() => {
+    if (ready) {
+      const timer = setTimeout(() => {
+        onReady(); // Move to FlightPhase automatically
+      }, 1800); // 1.8s delay so you can see the "Connection" message
+      return () => clearTimeout(timer);
+    }
+  }, [ready, onReady]);
+  
+  useEffect(() => {
+    let stream = null;
+
+    async function init() {
+      try {
+        const { HandLandmarker, FilesetResolver } = await import(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm"
+        );
+        setStatus("Loading vision model…");
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+        );
+        handLandmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", 
+            delegate: "GPU" },
+          runningMode: "VIDEO", numHands: 2,
+        });
+       
+        setStatus("Accessing webcam…");
+        stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" } });
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        setStatus("Tracking fingers — hold up both hands");
+        detectLoop();
+      } catch (e) {
+        setStatus("Error: " + e.message);
+      }
+    }
+
+    function detectLoop() {
+      if (!videoRef.current || !handLandmarkerRef.current || !canvasRef.current) {
+        animFrameRef.current = requestAnimationFrame(detectLoop);
+        return;
+      }
+      const results = handLandmarkerRef.current.detectForVideo(videoRef.current, performance.now());
+      const ctx = canvasRef.current.getContext("2d");
+      ctx.clearRect(0, 0, 640, 480);
+      let count = 0;
+      if (results.landmarks) {
+        for (const lm of results.landmarks) {
+          count++;
+          const tip = lm[8];
+          const cx = (1 - tip.x) * 640;
+          const cy = tip.y * 480;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 14, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(167,139,250,0.6)";
+          ctx.fill();
+          ctx.strokeStyle = "#e9d5ff";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+          ctx.fillStyle = "#fff";
+          ctx.fill();
+        }
+      }
+      setFingersDetected(count);
+      if (count >= 2 && !ready) {
+        setReady(true);
+      }
+      animFrameRef.current = requestAnimationFrame(detectLoop);
+    }
+
+    init();
+
+    
+    return () => {
+      cancelAnimationFrame(animFrameRef.current);
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      if (handLandmarkerRef.current) handLandmarkerRef.current.close();
+    };
+  }, []);
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 24, padding: 24 }}>
+      <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}
+        style={{ textAlign: "center" }}>
+        <p style={{ fontFamily: "'Cinzel', serif", letterSpacing: "5px", fontSize: 11, color: "rgba(255,255,255,0.45)", textTransform: "uppercase", marginBottom: 8 }}>
+          The Ascent
+        </p>
+        <h2 style={{ fontFamily: "'Cinzel', serif", fontSize: 26, color: "#fff", fontWeight: 400, marginBottom: 6 }}>
+          Calibrating Your Hands
+        </h2>
+        <p style={{ fontFamily: "'Lora', serif", color: "rgba(255,255,255,0.55)", fontSize: 13 }}>{status}</p>
+      </motion.div>
+
+      <div style={{ position: "relative", borderRadius: 20, overflow: "hidden", border: "1px solid rgba(255,255,255,0.15)", boxShadow: "0 0 60px rgba(167,139,250,0.2)" }}>
+        <video ref={videoRef} width={400} height={300} style={{ display: "block", transform: "scaleX(-1)", opacity: 0.6 }} playsInline muted />
+        <canvas ref={canvasRef} width={640} height={480} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", transform: "scaleX(-1)" }} />
+        <div style={{ position: "absolute", inset: 0, background: "linear-gradient(to bottom, transparent 60%, rgba(0,0,0,0.5))" }} />
+        <div style={{ position: "absolute", bottom: 12, left: 0, right: 0, textAlign: "center" }}>
+          <span style={{ fontFamily: "'Cinzel', serif", fontSize: 10, letterSpacing: "3px", color: fingersDetected >= 2 ? "#86efac" : "rgba(255,255,255,0.4)", textTransform: "uppercase" }}>
+            {fingersDetected >= 2 ? "✦ Both Fingers Detected" : `Fingers: ${fingersDetected}/2`}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── PHASE 3: FLIGHT ──────────────────────────────────────────────────────────
+function FlightPhase({ kiteConfig, onComplete }) {
+  const videoRef = useRef(null);
+  const handLandmarkerRef = useRef(null);
+  const animFrameRef = useRef(null);
+  const containerRef = useRef(null);
+  const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
+  const [leftFinger, setLeftFinger] = useState(null);
+  const [rightFinger, setRightFinger] = useState(null);
+  const [currentDecision, setCurrentDecision] = useState(0);
+  const [choices, setChoices] = useState([]);
+  const [bubbleKey, setBubbleKey] = useState(0);
+  const kite = useKitePhysics();
+  const [kiteScreenPos, setKiteScreenPos] = useState({ x: 400, y: 300 });
+
+  useEffect(() => {
+    if (containerRef.current) {
+      const r = containerRef.current.getBoundingClientRect();
+      setContainerSize({ w: r.width, h: r.height });
+    }
+  }, []);
+
+  // Webcam + MediaPipe
+  useEffect(() => {
+    let stream = null;
+    async function init() {
+      const { HandLandmarker, FilesetResolver } = await import(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm"
+      );
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+      );
+      handLandmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate: "GPU" },
+        runningMode: "VIDEO", numHands: 2,
+      });
+      stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
+      detectLoop();
+    }
+
+    function detectLoop() {
+      if (!videoRef.current || !handLandmarkerRef.current) {
+        animFrameRef.current = requestAnimationFrame(detectLoop);
+        return;
+      }
+      const results = handLandmarkerRef.current.detectForVideo(videoRef.current, performance.now());
+      if (results.landmarks && results.handednesses) {
+        let lf = null, rf = null;
+        results.landmarks.forEach((lm, i) => {
+          const hand = results.handednesses[i]?.[0]?.categoryName;
+          const tip = lm[8];
+          // Mirror x
+          const sx = (1 - tip.x) * containerRef.current?.offsetWidth || 800;
+          const sy = tip.y * (containerRef.current?.offsetHeight || 600);
+          if (hand === "Right") lf = { x: sx, y: sy };
+          else rf = { x: sx, y: sy };
+        });
+        setLeftFinger(lf);
+        setRightFinger(rf);
+        // Kite target = midpoint
+        if (lf && rf) {
+          const mx = (lf.x + rf.x) / 2;
+          const my = (lf.y + rf.y) / 2;
+          const tilt = (rf.y - lf.y) * 0.3;
+          kite.setTarget(mx, my, tilt);
+        } else if (lf) {
+          kite.setTarget(lf.x, lf.y - 80, 0);
+        } else if (rf) {
+          kite.setTarget(rf.x, rf.y - 80, 0);
+        }
+      }
+      animFrameRef.current = requestAnimationFrame(detectLoop);
+    }
+
+    init();
+    return () => {
+      cancelAnimationFrame(animFrameRef.current);
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      if (handLandmarkerRef.current) handLandmarkerRef.current.close();
+    };
+  }, []);
+
+  // Track kite screen position for collision
+  useEffect(() => {
+    const unsub = kite.x.onChange(v => setKiteScreenPos(p => ({ ...p, x: v })));
+    return unsub;
+  }, [kite.x]);
+  useEffect(() => {
+    const unsub = kite.y.onChange(v => setKiteScreenPos(p => ({ ...p, y: v })));
+    return unsub;
+  }, [kite.y]);
+
+  const handleCollect = useCallback((side, decision) => {
+    setChoices(prev => [...prev, { side, text: decision[side].text, label: decision[side].label, color: decision[side].color }]);
+    setTimeout(() => {
+      setCurrentDecision(prev => {
+        const next = prev + 1;
+        if (next >= DECISIONS.length) {
+          setTimeout(() => onComplete([...choices, { side, text: decision[side].text, label: decision[side].label, color: decision[side].color }]), 1200);
+        } else {
+          setBubbleKey(k => k + 1);
+        }
+        return next;
+      });
+    }, 800);
+  }, [choices, onComplete]);
+
+  const decision = DECISIONS[Math.min(currentDecision, DECISIONS.length - 1)];
+
+  return (
+    <div ref={containerRef} style={{ position: "fixed", inset: 0, overflow: "hidden" }}>
+      {/* Hidden video */}
+      <video ref={videoRef} style={{ display: "none" }} playsInline muted />
+
+      {/* Floating clouds */}
+      {[...Array(5)].map((_, i) => (
+        <motion.div key={i}
+          animate={{ x: ["0%", "110%"] }}
+          transition={{ duration: 30 + i * 8, repeat: Infinity, delay: i * 6, ease: "linear" }}
+          style={{
+            position: "absolute", top: `${10 + i * 15}%`, left: "-15%",
+            width: `${80 + i * 30}px`, height: `${30 + i * 10}px`,
+            borderRadius: "50%", background: "rgba(255,255,255,0.06)",
+            filter: "blur(12px)", pointerEvents: "none",
+          }}
+        />
+      ))}
+
+      {/* Strings */}
+      <KiteStrings leftFinger={leftFinger} rightFinger={rightFinger} kiteX={kiteScreenPos.x} kiteY={kiteScreenPos.y} />
+
+      {/* Decision Bubbles */}
+      <AnimatePresence>
+        {currentDecision < DECISIONS.length && (
+          <>
+            <DecisionBubble key={`L-${bubbleKey}`} decision={decision} side="left"
+              onCollect={handleCollect} kiteX={kiteScreenPos.x} kiteY={kiteScreenPos.y}
+              containerW={containerSize.w} containerH={containerSize.h} />
+            <DecisionBubble key={`R-${bubbleKey}`} decision={decision} side="right"
+              onCollect={handleCollect} kiteX={kiteScreenPos.x} kiteY={kiteScreenPos.y}
+              containerW={containerSize.w} containerH={containerSize.h} />
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* Kite */}
+      <motion.div style={{ position: "absolute", x: kite.x, y: kite.y, rotate: kite.rotate, translateX: "-50%", translateY: "-50%" }}>
+        <KiteSVG {...kiteConfig} />
+      </motion.div>
+
+      {/* Finger indicators */}
+      <AnimatePresence>
+        {leftFinger && (
+          <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }}
+            style={{ position: "absolute", left: leftFinger.x - 10, top: leftFinger.y - 10, width: 20, height: 20, borderRadius: "50%", background: "rgba(167,139,250,0.5)", border: "2px solid #a78bfa", pointerEvents: "none" }} />
+        )}
+        {rightFinger && (
+          <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }}
+            style={{ position: "absolute", left: rightFinger.x - 10, top: rightFinger.y - 10, width: 20, height: 20, borderRadius: "50%", background: "rgba(56,189,248,0.5)", border: "2px solid #38bdf8", pointerEvents: "none" }} />
+        )}
+      </AnimatePresence>
+
+      {/* HUD */}
+      <div style={{ position: "absolute", top: 20, left: "50%", transform: "translateX(-50%)", textAlign: "center" }}>
+        <div style={{ ...glassPanel, padding: "10px 24px", display: "inline-flex", alignItems: "center", gap: 16 }}>
+          <span style={{ fontFamily: "'Cinzel', serif", fontSize: 10, letterSpacing: "3px", color: "rgba(255,255,255,0.4)", textTransform: "uppercase" }}>
+            Decision {Math.min(currentDecision + 1, DECISIONS.length)} of {DECISIONS.length}
+           
+          </span>
+          <div style={{ display: "flex", gap: 6 }}>
+            {DECISIONS.map((_, i) => (
+              <div key={i} style={{ width: 8, height: 8, borderRadius: "50%", background: i < choices.length ? "#a78bfa" : "rgba(255,255,255,0.15)" }} />
+            ))}
+          </div>
+    
+        </div>
+       
+      </div>
+
+      {/* Collected choices */}
+      <div style={{ position: "absolute", bottom: 20, left: 20, display: "flex", flexDirection: "column", gap: 6 }}>
+        {choices.map((c, i) => (
+          <motion.div key={i} initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }}
+            style={{ ...glassPanel, padding: "6px 14px", display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 6, height: 6, borderRadius: "50%", background: c.color }} />
+            <span style={{ fontSize: 10, color: "rgba(255,255,255,0.6)", fontFamily: "'Lora', serif" }}>
+              <strong style={{ color: c.color }}>{c.label}</strong> — {c.text.slice(0, 40)}…
+            </span>
+          </motion.div>
+        ))}
+      </div>
+
+      {/* Instructions */}
+      {!leftFinger && !rightFinger && (
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+          style={{ position: "absolute", bottom: 100, left: "50%", transform: "translateX(-50%)", textAlign: "center" }}>
+          <p style={{ fontFamily: "'Lora', serif", color: "rgba(255,255,255,0.4)", fontSize: 12 , fontSize: "1.3rem", fontWeight: "400"}}>
+            ✦ Hold up your index fingers to fly.<br/>Guide the kite towards a bubble to select a decision. ✦
+          </p>
+        </motion.div>
+      )}
+    </div>
+  );
+}
+
+// ─── PHASE 4: CONCLUSION ──────────────────────────────────────────────────────
+function ConclusionPhase({ choices, onRestart }) {
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 32 }}>
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 1.5 }}
+        style={{ maxWidth: 620, width: "100%", textAlign: "center" }}>
+
+        {/* Floating kite silhouette */}
+        <motion.div animate={{ y: [0, -20, 0], rotate: [-3, 3, -3] }}
+          transition={{ repeat: Infinity, duration: 5, ease: "easeInOut" }}
+          style={{ marginBottom: 32, opacity: 0.6 }}>
+          <svg width="60" height="80" viewBox="-35 -40 70 100" style={{ overflow: "visible" }}>
+            <polygon points="0,-40 30,0 0,50 -30,0" fill="rgba(167,139,250,0.3)" stroke="rgba(167,139,250,0.7)" strokeWidth="1.5" />
+            <line x1="0" y1="50" x2="0" y2="90" stroke="rgba(255,255,255,0.25)" strokeWidth="1.5" strokeDasharray="4 3" />
+          </svg>
+        </motion.div>
+
+        <motion.p initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}
+          style={{ fontFamily: "'Cinzel', serif", letterSpacing: "5px", fontSize: 10, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", marginBottom: 16 }}>
+          End of Flight
+        </motion.p>
+
+        <motion.h1 initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.7 }}
+          style={{ fontFamily: "'Cinzel', serif", fontSize: 20, fontWeight: 400, color: "#e9d5ff", lineHeight: 1.7, marginBottom: 24 }}>
+          Thank you for playing.
+        </motion.h1>
+
+        <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.2 }}
+          style={{ ...glassPanel, padding: "28px 36px", fontFamily: "'Lora', serif", fontSize: 16, color: "rgba(255,255,255,0.8)", lineHeight: 1.9, marginBottom: 32, fontStyle: "italic" }}>
+        "Every choice has been a lesson in the architecture of balance. Growing up, I viewed my dual identity as a quiet tug-of-war, 
+        a struggle to decide which part of me would hold the line and which would let go.
+        I’ve realized that this tension isn't a conflict. It is my foundation. The grounding force of my heritage
+        isn’t meant to restrict, and the driving winds of my modern world aren't meant to scatter. They are the two 
+        essential energies that keep me aloft.  I am not caught between two worlds. I am supported by both. By leaning into the pull from my roots and the lift 
+        from my surroundings, I have found a height that belongs entirely to me. I am no longer just navigating the sky. I am a part of it."
+        </motion.p>
+
+        {choices.length > 0 && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.8 }}
+            style={{ ...glassPanel, padding: "20px 28px", marginBottom: 32, textAlign: "left" }}>
+            <p style={{ fontFamily: "'Cinzel', serif", fontSize: 10, letterSpacing: "3px", color: "rgba(255,255,255,0.35)", textTransform: "uppercase", marginBottom: 14 }}>Your Path</p>
+            {choices.map((c, i) => (
+              <motion.div key={i} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 2 + i * 0.3 }}
+                style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: c.color, marginTop: 5, flexShrink: 0 }} />
+                <div>
+                  <span style={{ fontFamily: "'Cinzel', serif", fontSize: 9, letterSpacing: "2px", color: c.color, textTransform: "uppercase" }}>{c.label} — </span>
+                  <span style={{ fontFamily: "'Lora', serif", fontSize: 13, color: "rgba(255,255,255,0.65)" }}>{c.text}</span>
+                </div>
+              </motion.div>
+            ))}
+          </motion.div>
+        )}
+
+        <motion.button initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 2.5 }}
+          whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }}
+          onClick={onRestart}
+          style={{
+            padding: "12px 28px", borderRadius: 10,
+            background: "rgba(255,255,255,0.07)",
+            border: "1px solid rgba(255,255,255,0.15)", color: "rgba(255,255,255,0.5)",
+            fontFamily: "'Cinzel', serif", letterSpacing: "3px", fontSize: 10,
+            cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8,
+          }}>
+          <RefreshCw size={12} /> Fly Again
+        </motion.button>
+      </motion.div>
+    </div>
+  );
+}
+
+const glassPanel = {
+  background: "rgba(255,255,255,0.06)",
+  backdropFilter: "blur(16px)",
+  border: "1px solid rgba(255,255,255,0.12)",
+  borderRadius: 16,
+};
+
+// ─── ROOT APP ─────────────────────────────────────────────────────────────────
+export default function App() {
+  const [phase, setPhase] = useState("workshop");
+  const [kiteConfig, setKiteConfig] = useState(null);
+  const [choices, setChoices] = useState([]);
+
+  return (
+    <>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600&family=Lora:ital,wght@0,400;0,500;1,400&display=swap');
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body { overflow: hidden; }
+        input[type=range] { -webkit-appearance: none; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.15); outline: none; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%; background: rgba(167,139,250,0.9); cursor: pointer; }
+
+        @keyframes skyShift {
+          0%   { background-position: 0% 0%; }
+          50%  { background-position: 100% 100%; }
+          100% { background-position: 0% 0%; }
+        }
+
+        .sky-bg {
+          position: fixed; inset: 0; z-index: -1;
+          background: linear-gradient(
+            135deg,
+            #0f0c29 0%,
+            #302b63 20%,
+            #1a1a4e 35%,
+            #6b21a8 50%,
+            #dc6a34 65%,
+            #f59e0b 80%,
+            #fbbf24 100%
+          );
+          background-size: 300% 300%;
+          animation: skyShift 20s ease infinite;
+        }
+
+        .sky-bg::after {
+          content: '';
+          position: absolute; inset: 0;
+          background: radial-gradient(ellipse at 50% 0%, rgba(255,255,255,0.04) 0%, transparent 70%);
+        }
+
+        /* Stars */
+        .stars {
+          position: fixed; inset: 0; z-index: -1; overflow: hidden;
+        }
+        .star {
+          position: absolute; border-radius: 50%;
+          background: rgba(255,255,255,0.7);
+          animation: twinkle var(--dur) ease-in-out infinite;
+        }
+        @keyframes twinkle {
+          0%, 100% { opacity: 0.2; transform: scale(1); }
+          50% { opacity: 1; transform: scale(1.4); }
+        }
+      `}</style>
+
+      {/* Sky */}
+      <div className="sky-bg" />
+
+      {/* Stars */}
+      <div className="stars">
+        {[...Array(40)].map((_, i) => (
+          <div key={i} className="star" style={{
+            left: `${Math.random() * 100}%`,
+            top: `${Math.random() * 60}%`,
+            width: `${1 + Math.random() * 2}px`,
+            height: `${1 + Math.random() * 2}px`,
+            "--dur": `${2 + Math.random() * 4}s`,
+            animationDelay: `${Math.random() * 4}s`,
+            opacity: Math.random() * 0.6 + 0.1,
+          }} />
+        ))}
+      </div>
+
+      <AnimatePresence mode="wait">
+        {phase === "workshop" && (
+          <motion.div key="workshop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <div style={{ position: "absolute", top: 24, left: "50%", transform: "translateX(-50%)", textAlign: "center", width: "80%", zIndex: 10 }}>
+              <h1 style={{ fontFamily: "'Cinzel', serif", fontSize: "2.5rem", fontWeight: "600", letterSpacing: "-0.02em", color: "rgba(255,255,255,0.35)", textTransform: "uppercase" }}>
+                Design Your Kite
+              </h1>
+            </div>
+            <WorkshopPhase onDone={(cfg) => { setKiteConfig(cfg); setPhase("ascent"); }} />
+          </motion.div>
+        )}
+
+        {phase === "ascent" && (
+          <motion.div key="ascent" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <AscentPhase onReady={() => setPhase("flight")} />
+          </motion.div>
+        )}
+
+        {phase === "flight" && (
+          <motion.div key="flight" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            style={{ position: "fixed", inset: 0 }}>
+            <FlightPhase kiteConfig={kiteConfig} onComplete={(c) => { setChoices(c); setPhase("conclusion"); }} />
+          </motion.div>
+        )}
+
+        {phase === "conclusion" && (
+          <motion.div key="conclusion" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <ConclusionPhase choices={choices} onRestart={() => { setChoices([]); setPhase("workshop"); }} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
+  );
 }
